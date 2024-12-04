@@ -1,4 +1,4 @@
-# Tick Data Downloader
+# Tick Data Downloader & FX API's (Tradelocker & DXTrade)
 
 A Python script for downloading and saving tick data from Dukascopy for a specified currency pair and date range.
 
