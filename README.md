@@ -166,13 +166,7 @@ This project is licensed under the MIT License.
 
 ## Contact
 
-For questions or comments, please contact Tamzid Ullah at [tamzidullah@example.com](mailto:tamzidullah@example.com).
-
----
-
-**Note**: Ensure you replace `tamzidullah@example.com` with your actual email address.
-
----
+For questions or comments, please contact Tamzid Ullah.
 
 ## Important Considerations
 
