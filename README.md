@@ -1,3 +1,188 @@
+# Tick Data Downloader
+
+A Python script for downloading and saving tick data from Dukascopy for a specified currency pair and date range.
+
+**Author**: Tamzid Ullah
+
+---
+
+## Description
+
+`tickdownloader.py` is a Python script that allows you to download tick data (timestamps and bid prices) for a given currency pair from the Dukascopy data feed over a specified date range. The script organizes each download request into its own subfolder for better data management.
+
+---
+
+## Features
+
+- **Flexible Date Range**: Input a start and end date in `MM-DD-YYYY` format to download data over multiple days.
+- **Hourly Data**: Downloads tick data for each hour within the specified date range.
+- **Customizable Output**: Saves data with only the `timestamp` and `bid` price columns for simplicity.
+- **Organized Storage**: Each download request is stored in a unique subfolder to keep data organized.
+- **Supports Multiple Symbols**: Easily change the currency pair symbol to download different instruments.
+
+---
+
+## Requirements
+
+- Python 3.x
+- `requests` library
+- Standard libraries: `datetime`, `csv`, `os`, `struct`, `lzma`
+
+---
+
+## Installation
+
+### Clone or Download the Repository
+
+Clone the repository or download the `tickdownloader.py` file directly.
+
+```bash
+git clone https://github.com/yourusername/tickdata_downloader.git
+```
+
+### Navigate to the Directory
+
+```bash
+cd tickdata_downloader
+```
+
+### Install Required Python Packages
+
+Ensure you have the `requests` library installed:
+
+```bash
+pip install requests
+```
+
+---
+
+## Usage
+
+### 1. Run the Script
+
+Execute the script using Python:
+
+```bash
+python tickdownloader.py
+```
+
+### 2. Input the Start and End Dates
+
+When prompted, enter the start date and end date in `MM-DD-YYYY` format:
+
+```
+Enter the start date (MM-DD-YYYY): 04-08-2024
+Enter the end date (MM-DD-YYYY): 04-10-2024
+```
+
+### 3. Wait for the Download to Complete
+
+The script will process each date and hour, displaying progress messages:
+
+```
+Processing date: 2024-04-08
+  Hour 00: Data saved.
+  Hour 01: Data saved.
+  ...
+All data saved to tick_data/GBPUSD_20240408_to_20240410_20231203_204512/historical_tick_data.csv
+```
+
+### 4. Access the Downloaded Data
+
+The tick data is saved in a CSV file within a uniquely named subfolder inside the `tick_data` directory.
+
+**Example Directory Structure:**
+
+```
+tick_data/
+└── GBPUSD_20240408_to_20240410_20231203_204512/
+    └── historical_tick_data.csv
+```
+
+---
+
+## Customization
+
+### Changing the Currency Pair Symbol
+
+To download data for a different currency pair, modify the `symbol` variable in the script:
+
+```python
+# Set the symbol
+symbol = 'EURUSD'  # Change to your desired symbol
+```
+
+### Adjusting the Base Output Directory
+
+To change the base directory where data is saved, modify the `base_output_dir` parameter when creating an instance of the downloader:
+
+```python
+downloader = DukascopyTickDataDownloader(symbol, start_date, end_date, base_output_dir='my_custom_data_dir')
+```
+
+### Including Additional Data Columns
+
+If you want to include more data columns such as `ask`, `ask_volume`, or `bid_volume`, adjust the `fieldnames` list and the `parse_ticks` method:
+
+- **Modify Field Names:**
+
+  ```python
+  fieldnames = ['timestamp', 'bid', 'ask', 'bid_volume', 'ask_volume']
+  ```
+
+- **Update the `parse_ticks` Method:**
+
+  Include the additional fields in the `tick` dictionary:
+
+  ```python
+  tick = {
+      'timestamp': tick_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+      'bid': bid_price / self.point_value,
+      'ask': ask_price / self.point_value,
+      'bid_volume': bid_volume,
+      'ask_volume': ask_volume
+  }
+  ```
+
+- **Adjust the `writer.writerow` Call:**
+
+  ```python
+  writer.writerow(tick)
+  ```
+
+---
+
+## Notes
+
+- **Data Volume**: Downloading tick data over multiple days can result in large files. Ensure you have sufficient disk space and a stable internet connection.
+- **Network Usage**: Be aware of your data usage, especially if on a limited or metered connection.
+- **Terms of Service**: Ensure compliance with Dukascopy's terms of service regarding data usage and automated downloads.
+
+## License
+
+This project is licensed under the MIT License.
+
+---
+
+## Contact
+
+For questions or comments, please contact Tamzid Ullah at [tamzidullah@example.com](mailto:tamzidullah@example.com).
+
+---
+
+**Note**: Ensure you replace `tamzidullah@example.com` with your actual email address.
+
+---
+
+## Important Considerations
+
+- **Compliance with Dukascopy's Terms**: Before using this script, please make sure you comply with Dukascopy's terms of service regarding data access and usage.
+- **Data Usage**: Be responsible with the amount of data you download to avoid overloading the server or violating any rate limits.
+
+---
+
+If you have any questions or need further assistance with the script, feel free to reach out!
+
 # TradeLocker and DXtrade API Integration
 
 This repository contains the implementation of API endpoints for both **TradeLocker** and **DXtrade** trading platforms. This README provides detailed documentation for each API endpoint, including usage examples, parameters, and expected responses.
