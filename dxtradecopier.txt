@@ -1,0 +1,157 @@
+#include <Trade/DealInfo.mqh>
+#include <Generic/HashMap.mqh>
+
+#define BASE_URL "https://dxtrade.ftmo.com/dxsca-web/"
+#define ACCOUNT_FTMO "1210004351"
+#define PASSWORD_FTMO "Passwordi!"
+
+string token;
+datetime timeout;
+CHashMap<ulong,ulong> positions;
+
+int OnInit(){
+   login();
+   return(INIT_SUCCEEDED);
+}
+
+void OnTick(){
+   if(TimeCurrent() > timeout - 300) ping();
+}
+
+void OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeRequest& request, const MqlTradeResult& result){
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD){
+      CDealInfo deal;
+      if(HistoryDealSelect(trans.deal)){
+         deal.Ticket(trans.deal);
+         string orderCode = IntegerToString(deal.Ticket());
+         string instrument = deal.Symbol();
+         double quantity = deal.Volume();
+         if(SymbolInfoInteger(deal.Symbol(),SYMBOL_TRADE_CALC_MODE) == SYMBOL_CALC_MODE_FOREX) quantity *= 100000;
+         
+         ulong orderId;
+         if(deal.Entry() == DEAL_ENTRY_IN){
+            string positionEffect = "OPEN";
+            string side = deal.DealType() == DEAL_TYPE_BUY ? "BUY" : "SELL";
+            
+            for(int i = 0; i < 10; i++){
+               int res = placeOrder(orderCode, instrument, quantity, positionEffect, "", side, orderId);
+               if(res == 200){
+                  positions.Add(trans.position, orderId);
+                  Print("Successfully sent position #", trans.position, " to dxtrade as order #", orderId, "...");
+                  break;
+               }
+            }
+         } else if(deal.Entry() == DEAL_ENTRY_OUT){
+            string positionEffect = "CLOSE";
+            ulong value;
+            if(!positions.TryGetValue(trans.position, value)){
+               Print("Unable to find dxtrade position for mt5 position #", trans.position,"...");
+               return;
+            }
+            string positionCode = IntegerToString(value);
+            string side = deal.DealType() == DEAL_TYPE_BUY ? "BUY" : "SELL";
+            for(int i = 0; i < 10; i++){
+               int res = placeOrder(orderCode, instrument, quantity, positionEffect, positionCode, side, orderId);
+               if(res == 200){
+                  positions.Remove(trans.position);
+                  Print("Successfully closed pos #", trans.position, " at dxtrade with order #", orderId, "...");
+                  break;
+               }
+            }
+         }
+      }
+   }
+}
+
+int login(){
+   string url = BASE_URL + "login";
+   char post[], result[];
+   string headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
+   string resultHeader;
+   string json = "{\"username\":\""+ACCOUNT_FTMO+"\",\"domain\":\"default\",\"password\":\""+PASSWORD_FTMO+"\"}";
+   StringToCharArray(json, post, 0, StringLen(json));
+   ResetLastError();
+   int res = WebRequest("POST", url, headers, 5000, post, result, resultHeader);
+   if(res == -1){
+      Print("web request failed... code: ", GetLastError());
+   } else if(res != 200){
+      Print("server request failed... code: ", res);
+   } else {
+      string msg = CharArrayToString(result);
+      Print("server request success... ", msg);
+      token = getJsonStringValue(msg, "sessionToken");
+      timeout = TimeCurrent() + PeriodSeconds(PERIOD_M1) * 30;
+      Print("token: ", token, ", timeout: ", timeout);
+   }
+   return res;
+}
+
+int ping(){
+   string url = BASE_URL + "ping";
+   char post[], result[];
+   string headers = "Content-Type: application/json\r\nAccept: application/json\r\nAuthorization: DXAPI "+token+"\r\n";
+   string resultHeader;
+   ResetLastError();
+   int res = WebRequest("POST", url, headers, 5000, post, result, resultHeader);
+   if(res == -1){
+      Print("web request failed... code: ", GetLastError());
+   } else if(res != 200){
+      Print("server request failed... code: ", res);
+   } else {
+      string msg = CharArrayToString(result);
+      Print("server request success... ", msg);
+      timeout = TimeCurrent() + PeriodSeconds(PERIOD_M1) * 30;
+      Print("token: ", token, ", timeout: ", timeout);
+   }
+   return res;
+}
+
+int placeOrder(string orderCode, string instrument, double quantity, string positionEffect, string positionCode, string side, ulong& orderId){
+   string url = BASE_URL + "accounts/default:" + ACCOUNT_FTMO + "/orders";
+   char post[], result[];
+   string headers = "Content-Type: application/json\r\nAccept: application/json\r\nAuthorization: DXAPI "+token+"\r\n";
+   string resultHeader;
+   
+   string json;
+   StringConcatenate(json,
+      "{",
+         "\"account\": \"default:"+ACCOUNT_FTMO+"\",",
+         "\"orderCode\": \"", orderCode, "\",",
+         "\"type\": \"MARKET\",",
+         "\"instrument\": \"", instrument, "\",",
+         "\"quantity\": ", quantity, ",",
+         "\"positionEffect\": \"", positionEffect, "\",",
+         "\"positionCode\": \"", positionCode, "\",",
+         "\"side\": \"", side, "\",",
+         "\"tif\": \"GTC\"",
+      "}"
+   );
+   StringToCharArray(json, post, 0, StringLen(json));
+
+   ResetLastError();
+   int res = WebRequest("POST", url, headers, 5000, post, result, resultHeader);
+   if(res == -1){
+      Print("web request failed... code: ", GetLastError());
+   } else if(res != 200){
+      Print("server request failed... code: ", res);
+   } else {
+      string msg = CharArrayToString(result);
+      Print("server request success... ", msg);
+      
+      orderId = getJsonLongValue(msg, "orderId");
+      Print("orderId: ", orderId);
+   }
+   return res;
+}
+
+string getJsonStringValue(string json, string key){
+   int indexStart = StringFind(json, key) + StringLen(key) + 3;
+   int indexEnd = StringFind(json, "\"", indexStart);
+   return StringSubstr(json, indexStart, indexEnd - indexStart);
+}
+
+long getJsonLongValue(string json, string key){
+   int indexStart = StringFind(json, key) + StringLen(key) + 2;
+   int indexEnd = StringFind(json, ",", indexStart);
+   return StringToInteger(StringSubstr(json, indexStart, indexEnd - indexStart));
+}
