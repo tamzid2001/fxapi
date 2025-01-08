@@ -1,19 +1,24 @@
 #include <Trade/DealInfo.mqh>
 #include <Generic/HashMap.mqh>
 
-// Replace with your actual TradeLocker endpoints and credentials
-#define TRADELOCKER_BASE_URL  "https://api.tradelocker.com"
-#define TRADELOCKER_EMAIL     "your_email@example.com"
-#define TRADELOCKER_PASSWORD  "your_password"
-#define TRADELOCKER_SERVER    "SERVER"  // If TradeLocker requires a server field
+// ===================== USER CONFIG =====================
+// Use `input` variables so they are recognized as valid in MQL5.
+input string  g_TradeLockerBaseUrl     = "https://api.tradelocker.com";
+input string  g_TradeLockerEmail       = "your_email@example.com";
+input string  g_TradeLockerPassword    = "your_password";
+input string  g_TradeLockerServer      = "SERVER";  // If required by TradeLocker
+input string  g_TradeLockerAccountId   = "123456";  // Example ID
+input long    g_TradableInstrumentId   = 12345;     // E.g. used in placeOrder or closePositions
+input int     MAGIC_NUMBER             = 12345;     // Local trades filter
+// ======================================================
 
-// Example account number or ID as needed by TradeLocker
-#define TRADELOCKER_ACCOUNT   "123456" 
+// Global tokens and session expiry
+string   g_accessToken   = "";
+string   g_refreshToken  = "";
+datetime g_sessionExpiry = 0; // If you want to store a token expiration time
 
-// Global token, session timeout, and mapping table
-string g_accessToken = "";
-datetime g_timeout;
-CHashMap<ulong, ulong> g_positions;  // Local position -> TradeLocker order ID mapping
+// HashMap: local position ID -> TradeLocker "orderId" or "positionId"
+CHashMap<ulong, ulong> positions;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -21,9 +26,10 @@ CHashMap<ulong, ulong> g_positions;  // Local position -> TradeLocker order ID m
 int OnInit()
 {
    // Attempt to login to TradeLocker
-   if(login() != 200)
+   int res = login();
+   if(res != 201 && res != 200)
    {
-      Print("Failed to authenticate with TradeLocker in OnInit.");
+      Print("Failed to authenticate with TradeLocker in OnInit. code=", res);
       return(INIT_FAILED);
    }
    return(INIT_SUCCEEDED);
@@ -34,7 +40,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   // You can optionally implement a logout call if TradeLocker supports it
+   // Optionally, call logout if your TradeLocker API supports it
 }
 
 //+------------------------------------------------------------------+
@@ -42,13 +48,12 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   // Refresh/ping session token if about to expire
-   if(TimeCurrent() > g_timeout - 300)
-      ping();
+   // If tokens have an expiration, refresh or re-login if near expiry
+   // E.g. if(TimeCurrent() + 300 > g_sessionExpiry) refreshToken();
 }
 
 //+------------------------------------------------------------------+
-//| TradeTransaction handler: replicate local trades to TradeLocker  |
+//| OnTradeTransaction: replicate local trades to TradeLocker        |
 //+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans, 
                         const MqlTradeRequest &request, 
@@ -58,234 +63,295 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    {
       // A local deal was executed
       CDealInfo deal;
-      if(HistoryDealSelect(trans.deal))
+      if(!HistoryDealSelect(trans.deal))
       {
-         deal.Ticket(trans.deal);
+         Print("Failed to select deal #", trans.deal);
+         return;
+      }
+      deal.Ticket(trans.deal);
 
-         string orderCode = IntegerToString(deal.Ticket());
-         string instrument = deal.Symbol();
-         double quantity = deal.Volume();
+      string orderCode = IntegerToString(deal.Ticket());
+      string symbol    = deal.Symbol();
+      double quantity  = deal.Volume();
 
-         // If it's a Forex symbol, scale up the quantity to units
-         if(SymbolInfoInteger(deal.Symbol(), SYMBOL_TRADE_CALC_MODE) == SYMBOL_CALC_MODE_FOREX)
-            quantity *= 100000.0;
+      // If it's FOREX, scale volume to units
+      if(SymbolInfoInteger(symbol, SYMBOL_TRADE_CALC_MODE) == SYMBOL_CALC_MODE_FOREX)
+         quantity *= 100000.0;
 
-         ulong orderId;
-         // Check if the trade is opening or closing (DEAL_ENTRY_IN = open, DEAL_ENTRY_OUT = close, etc.)
-         if(deal.Entry() == DEAL_ENTRY_IN)
+      ulong orderId;
+      // Check if it’s an open (DEAL_ENTRY_IN) or close (DEAL_ENTRY_OUT)
+      if(deal.Entry() == DEAL_ENTRY_IN)
+      {
+         // Opening a new position
+         string positionEffect = "OPEN";
+         string side = (deal.DealType() == DEAL_TYPE_BUY) ? "BUY" : "SELL";
+
+         // Attempt placing order up to 10 times
+         for(int i=0; i<10; i++)
          {
-            string positionEffect = "OPEN";
-            string side = (deal.DealType() == DEAL_TYPE_BUY) ? "BUY" : "SELL";
-
-            // Attempt placing an OPEN order on TradeLocker up to 10 times if needed
-            for(int i = 0; i < 10; i++)
+            int res = placeOrder(orderCode, symbol, quantity, positionEffect, "", side, orderId);
+            if(res == 200)
             {
-               int res = placeOrder(orderCode, instrument, quantity, positionEffect, /*positionCode*/"", side, orderId);
-               if(res == 200)
-               {
-                  // Store the mapping between local position ID and TradeLocker orderId
-                  g_positions.Add(trans.position, orderId);
-                  Print("Successfully sent position #", trans.position, " to TradeLocker as order #", orderId, "...");
-                  break;
-               }
+               // Store mapping from local pos -> remote order ID
+               positions.Add(trans.position, orderId);
+               PrintFormat("Opened pos #%d in TradeLocker as order #%d", trans.position, orderId);
+               break;
+            }
+            else
+            {
+               PrintFormat("Attempt %d to place OPEN order in TradeLocker failed, code=%d", i+1, res);
             }
          }
-         else if(deal.Entry() == DEAL_ENTRY_OUT)
+      }
+      else if(deal.Entry() == DEAL_ENTRY_OUT)
+      {
+         // Closing an existing position
+         string positionEffect = "CLOSE";
+
+         ulong remoteOrderId;
+         if(!positions.TryGetValue(trans.position, remoteOrderId))
          {
-            // Closing an existing position
-            string positionEffect = "CLOSE";
+            Print("No TradeLocker mapping found for local pos #", trans.position);
+            return;
+         }
 
-            // Retrieve stored TradeLocker order ID
-            ulong value;
-            if(!g_positions.TryGetValue(trans.position, value))
+         string positionCode = IntegerToString(remoteOrderId);
+         string side = (deal.DealType() == DEAL_TYPE_BUY) ? "BUY" : "SELL";
+
+         for(int i=0; i<10; i++)
+         {
+            int res = placeOrder(orderCode, symbol, quantity, positionEffect, positionCode, side, orderId);
+            if(res == 200)
             {
-               Print("Unable to find TradeLocker position for local MT5 position #", trans.position,"...");
-               return;
+               positions.Remove(trans.position);
+               PrintFormat("Closed pos #%d on TradeLocker with new order #%d", trans.position, orderId);
+               break;
             }
-            string positionCode = IntegerToString(value);
-            string side = (deal.DealType() == DEAL_TYPE_BUY) ? "BUY" : "SELL";
-
-            // Attempt placing a CLOSE order
-            for(int i = 0; i < 10; i++)
+            else
             {
-               int res = placeOrder(orderCode, instrument, quantity, positionEffect, positionCode, side, orderId);
-               if(res == 200)
-               {
-                  // Remove mapping since it's closed
-                  g_positions.Remove(trans.position);
-                  Print("Successfully closed pos #", trans.position, " on TradeLocker with order #", orderId, "...");
-                  break;
-               }
+               PrintFormat("Attempt %d to place CLOSE order in TradeLocker failed, code=%d", i+1, res);
             }
          }
       }
    }
-   // Additional transaction types (ORDER_UPDATE, ORDER_DELETE, etc.) can be handled similarly
 }
 
 //+------------------------------------------------------------------+
-//| login() - Obtain a TradeLocker session token                     |
+//| login() - Obtain a JWT from TradeLocker                          |
 //+------------------------------------------------------------------+
 int login()
 {
-   string url = TRADELOCKER_BASE_URL + "/auth/jwt/token";
+   string url = g_TradeLockerBaseUrl + "/auth/jwt/token";
    char post[], result[];
    string resultHeader;
    string headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
-   
-   // If your TradeLocker requires a "server" field, include it. 
-   // Or adapt as needed based on your actual JSON body for login.
-   string json = "{\"email\":\"" + TRADELOCKER_EMAIL + "\","
-                 "\"password\":\"" + TRADELOCKER_PASSWORD + "\","
-                 "\"server\":\"" + TRADELOCKER_SERVER + "\"}";
-   
+
+   // JSON body
+   string json = "{\"email\":\""   + g_TradeLockerEmail    + "\","
+                 "\"password\":\"" + g_TradeLockerPassword + "\","
+                 "\"server\":\""   + g_TradeLockerServer   + "\"}";
+
    StringToCharArray(json, post, 0, StringLen(json));
    ResetLastError();
-   int res = WebRequest("POST", url, headers, 5000, post, result, resultHeader);
 
+   int res = WebRequest("POST", url, headers, 5000, post, result, resultHeader);
    if(res == -1)
    {
-      Print("login() WebRequest failed... code: ", GetLastError());
+      Print("login() WebRequest failed, err=", GetLastError());
+      return res;
    }
    else if(res != 201 && res != 200)
    {
-      Print("login() server request failed... code: ", res);
+      Print("login() request failed, http code=", res);
+      return res;
    }
    else
    {
       string msg = CharArrayToString(result);
-      Print("login() server request success... ", msg);
+      Print("login() success: ", msg);
 
-      // Extract accessToken from the JSON
-      string tokenFromJson = getJsonStringValue(msg, "accessToken");
-      if(tokenFromJson == "")
+      // Parse the JSON for "accessToken" and "refreshToken"
+      g_accessToken  = getJsonStringValue(msg, "accessToken");
+      g_refreshToken = getJsonStringValue(msg, "refreshToken");
+
+      if(g_accessToken == "")
       {
-         Print("Failed to parse 'accessToken' from login response.");
+         Print("Failed to parse accessToken from login response");
          return res;
       }
-      token = tokenFromJson;
 
-      // (Optional) parse refreshToken if needed, or store session expiration
-      // For demonstration, we set a 30-minute expiration from now:
-      g_timeout = TimeCurrent() + (30 * 60); // 30 minutes
+      // e.g. set a 30-minute session
+      g_sessionExpiry = TimeCurrent() + (30*60);
 
-      Print("TradeLocker token: ", token, ", session expiry: ", g_timeout);
+      Print("TradeLocker login OK, accessToken=", g_accessToken);
    }
    return res;
 }
 
 //+------------------------------------------------------------------+
-//| ping() - Keep session alive                                      |
+//| refreshToken() - obtains new tokens from /auth/jwt/refresh       |
 //+------------------------------------------------------------------+
-int ping()
+int refreshToken()
 {
-   string url = TRADELOCKER_BASE_URL + "/auth/jwt/refresh"; // or if there's a dedicated /ping route, use that
-   // If your TradeLocker requires different logic to refresh, adapt accordingly
-   // For demonstration, let's call a hypothetical /ping
-   // If the server does not have a ping, you might re-auth or do a refresh token call instead.
+   string url = g_TradeLockerBaseUrl + "/auth/jwt/refresh";
+   char post[], result[];
+   string resultHeader;
+   string headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
 
-   // This code uses a placeholder ping route or re-auth logic
-   // We'll just do a re-auth for example
-   // If your TradeLocker has a dedicated ping endpoint, replace with that
+   string json = "{\"refreshToken\":\"" + g_refreshToken + "\"}";
+   StringToCharArray(json, post, 0, StringLen(json));
+   ResetLastError();
 
-   // Alternatively, do a refresh token logic if your API allows
-   // We'll do a simple re-auth to keep code consistent
-   return login();
+   int res = WebRequest("POST", url, headers, 5000, post, result, resultHeader);
+   if(res == -1)
+   {
+      Print("refreshToken() WebRequest failed, err=", GetLastError());
+      return res;
+   }
+   else if(res != 201 && res != 200)
+   {
+      Print("refreshToken() request failed, http code=", res);
+      return res;
+   }
+   else
+   {
+      string msg = CharArrayToString(result);
+      Print("refreshToken() success: ", msg);
+
+      g_accessToken  = getJsonStringValue(msg, "accessToken");
+      g_refreshToken = getJsonStringValue(msg, "refreshToken");
+      if(g_accessToken == "")
+      {
+         Print("Failed to parse new accessToken from refresh response");
+         return res;
+      }
+      g_sessionExpiry = TimeCurrent() + (30*60);
+      Print("TradeLocker tokens refreshed OK, new accessToken=", g_accessToken);
+   }
+   return res;
 }
 
 //+------------------------------------------------------------------+
-//| placeOrder() - replicate an order to TradeLocker                 |
+//| placeOrder() - replicate trade to /trade/accounts/{accountId}/orders
 //+------------------------------------------------------------------+
 int placeOrder(string orderCode, string instrument, double quantity, 
                string positionEffect, string positionCode, 
-               string side, ulong &orderId)
+               string side, ulong &newOrderId)
 {
-   // Example endpoint: /trade/accounts/{accountId}/orders
-   // We'll assume one route for placing an order
-   string url = TRADELOCKER_BASE_URL + "/trade/accounts/" + TRADELOCKER_ACCOUNT + "/orders";
-   string headers = "Content-Type: application/json\r\nAccept: application/json\r\nAuthorization: Bearer " + token + "\r\n";
-
-   // Build JSON for placing an order. 
-   // If your API requires different fields, adapt accordingly.
-   // Example:
-   /*
-      {
-         "qty": 1000,
-         "routeId": 1,
-         "side": "buy",
-         "validity": "GTC",
-         "type": "market",
-         "tradableInstrumentId": 12345,
-         "price": 0
-      }
-      (TradeLocker might differ)
-   */
-
-   // Since your code shows "positionEffect", "positionCode", "side", let's keep that style:
-   // Possibly "type":"MARKET"
-   // TIF: "GTC"
-
+   string url = g_TradeLockerBaseUrl + "/trade/accounts/" + g_TradeLockerAccountId + "/orders";
    char post[], result[];
    string resultHeader;
-   
-   string json;
-   // In your snippet, you used "account":"default:1210004351", orderCode, type:"MARKET", instrument, quantity, positionEffect, positionCode, side, tif:"GTC"
-   // We'll replicate that style:
-   // (adjust as needed for TradeLocker naming)
 
-   StringConcatenate(json,
-      "{",
-         "\"account\": \"", TRADELOCKER_ACCOUNT, "\",",
-         "\"orderCode\": \"", orderCode, "\",",
-         "\"type\": \"MARKET\",",
-         "\"instrument\": \"", instrument, "\",",
-         "\"quantity\": ", DoubleToString(quantity,2), ",",
-         "\"positionEffect\": \"", positionEffect, "\",",
-         "\"positionCode\": \"", positionCode, "\",",
-         "\"side\": \"", side, "\",",
-         "\"tif\": \"GTC\"",
-      "}"
+   // Bearer {accessToken} is required
+   string headers = "Content-Type: application/json\r\nAccept: application/json\r\nAuthorization: Bearer " + g_accessToken + "\r\n";
+   
+   // Mandatory fields from your doc: qty, routeId, side, validity, type, tradableInstrumentId
+   // We'll do routeId=1, validity="GTC", type="market", price=0, stopLoss=0, etc.
+   // We also append the "orderCode", "positionEffect", "positionCode", etc.
+
+   string json = StringFormat(
+      "{"
+         "\"qty\":%f," 
+         "\"routeId\":1," 
+         "\"side\":\"%s\"," 
+         "\"validity\":\"GTC\","
+         "\"type\":\"market\","
+         "\"tradableInstrumentId\":%d,"
+         "\"price\":0,"
+         "\"stopLoss\":0,"
+         "\"takeProfit\":0,"
+         "\"stopPrice\":0,"
+         "\"positionEffect\":\"%s\","
+         "\"positionCode\":\"%s\","
+         "\"orderCode\":\"%s\","
+         "\"instrument\":\"%s\""
+      "}",
+      quantity,
+      side,
+      g_TradableInstrumentId,
+      positionEffect,
+      positionCode,
+      orderCode,
+      instrument
    );
 
    StringToCharArray(json, post, 0, StringLen(json));
    ResetLastError();
-   int res = WebRequest("POST", url, headers, 5000, post, result, resultHeader);
 
+   int res = WebRequest("POST", url, headers, 5000, post, result, resultHeader);
    if(res == -1)
    {
-      Print("placeOrder() web request failed... code: ", GetLastError());
+      Print("placeOrder(): WebRequest failed, err=", GetLastError());
       return res;
    }
    else if(res != 200)
    {
-      Print("placeOrder() server request failed... code: ", res);
+      Print("placeOrder(): server request failed, code=", res);
       return res;
    }
    else
    {
-      // Parse the server response for orderId
       string msg = CharArrayToString(result);
-      Print("placeOrder() server response... ", msg);
-      
-      orderId = getJsonLongValue(msg, "orderId");
-      Print("TradeLocker orderId: ", orderId);
+      Print("placeOrder(): response = ", msg);
+
+      // parse "orderId" from the JSON
+      // If the JSON is like { "d": { "orderId": "1" }, "s": "ok" }
+      // we might need a more advanced parse. For now we attempt:
+      string orderIdStr = getJsonStringValue(msg, "orderId");
+      newOrderId = (ulong)StringToInteger(orderIdStr);
+      Print("TradeLocker newOrderId=", newOrderId);
    }
    return res;
 }
 
 //+------------------------------------------------------------------+
-//| JSON parsing helpers                                             |
+//| closePositions() - calls DELETE /trade/accounts/{accountId}/positions
+//+------------------------------------------------------------------+
+int closePositions()
+{
+   // Example usage: we want to close all positions for the given account
+   // If we only want to close positions in TRADABLE_INSTRUMENT_ID:
+   string url = g_TradeLockerBaseUrl + "/trade/accounts/" + g_TradeLockerAccountId + "/positions";
+   if(g_TradableInstrumentId > 0)
+      url += "?tradableInstrumentId=" + (string)g_TradableInstrumentId;
+
+   char post[], result[];
+   string resultHeader;
+   string headers = "Authorization: Bearer " + g_accessToken + "\r\nAccept: application/json\r\n";
+
+   // For a DELETE request with no body:
+   int res = WebRequest("DELETE", url, headers, 5000, post, result, resultHeader);
+   if(res == -1)
+   {
+      Print("closePositions(): WebRequest failed, err=", GetLastError());
+      return res;
+   }
+   else if(res != 200)
+   {
+      Print("closePositions(): server request failed, code=", res);
+      return res;
+   }
+   else
+   {
+      string msg = CharArrayToString(result);
+      Print("closePositions() success. response=", msg);
+   }
+   return res;
+}
+
+//+------------------------------------------------------------------+
+//| JSON parse helpers                                               |
 //+------------------------------------------------------------------+
 string getJsonStringValue(string json, string key)
 {
    int indexStart = StringFind(json, key) + StringLen(key) + 3;
-   int indexEnd = StringFind(json, "\"", indexStart);
+   int indexEnd   = StringFind(json, "\"", indexStart);
    return StringSubstr(json, indexStart, indexEnd - indexStart);
 }
 
 long getJsonLongValue(string json, string key)
 {
    int indexStart = StringFind(json, key) + StringLen(key) + 2;
-   int indexEnd = StringFind(json, ",", indexStart);
-   return StringToInteger(StringSubstr(json, indexStart, indexEnd - indexStart));
+   int indexEnd   = StringFind(json, ",", indexStart);
+   return (long)StringToInteger(StringSubstr(json, indexStart, indexEnd - indexStart));
 }
